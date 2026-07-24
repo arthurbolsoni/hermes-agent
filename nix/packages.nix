@@ -21,6 +21,7 @@
         revCount = sourceInfo.revCount or null;
         branch = sourceInfo.ref or null;
         dirty = dirtyRevision != null;
+        lastModified = sourceInfo.lastModified or null;
       };
 
       # All platform-portable optional integrations pre-built.
