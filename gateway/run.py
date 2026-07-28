@@ -7908,6 +7908,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
         except Exception:
             pass
+
+        # Pre-warm the agent module tree so the first user turn after a
+        # restart does not pay for it. ``_run_agent_inner`` imports
+        # ``run_agent`` lazily; measured at 1.90s on this device (eMMC),
+        # charged entirely to that first message. Done on a thread so the
+        # import overlaps the platform bridges still coming up, and
+        # best-effort: on failure the turn path just imports it as before.
+        def _prewarm_agent_module() -> None:
+            _started = time.monotonic()
+            try:
+                from run_agent import AIAgent  # noqa: F401
+            except Exception as exc:
+                logger.debug("agent module pre-warm skipped: %s", exc)
+                return
+            logger.info(
+                "Agent module pre-warmed in %.2fs", time.monotonic() - _started
+            )
+
+        threading.Thread(
+            target=_prewarm_agent_module, name="agent-prewarm", daemon=True
+        ).start()
         try:
             from hermes_cli.profiles import get_active_profile_name
             _profile = get_active_profile_name()

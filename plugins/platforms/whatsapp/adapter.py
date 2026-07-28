@@ -439,6 +439,15 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._text_batch_split_delay_seconds = self._coerce_float_extra(
             "text_batch_split_delay_seconds", 10.0
         )
+        # Cadence of GET /messages against the bridge. Every inbound
+        # message waits here for half of this on average — 0.60s of a
+        # measured 2.95s warm round-trip, the cheapest latency left on
+        # the warm path. Tunable via config.yaml under
+        # ``platforms.whatsapp.extra.poll_interval_seconds``; floored so a
+        # stray 0 cannot turn the poll loop into a spin against the bridge.
+        self._poll_interval_seconds = max(
+            0.05, self._coerce_float_extra("poll_interval_seconds", 1.0)
+        )
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
 
@@ -1267,7 +1276,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 print(f"[{self.name}] Poll error: {e}")
                 await asyncio.sleep(5)
             
-            await asyncio.sleep(1)  # Poll interval
+            await asyncio.sleep(self._poll_interval_seconds)
 
     # ── Text debounce batching ──────────────────────────────────────
 
