@@ -1042,6 +1042,49 @@ app.post('/typing', async (req, res) => {
   }
 });
 
+// Set a profile picture: our own by default, or a group we admin via { target }.
+// Body: { path } pointing at any image jimp can read -- Baileys re-encodes it to
+// a 640x640 JPEG itself.  Note this needs jimp installed in this directory:
+// Baileys reaches for sharp first, and the sharp build here cannot load on
+// Termux/android-arm64 (no libvips), so jimp is what actually does the work.
+app.post('/profile-picture', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected' });
+  }
+
+  const { path: imagePath } = req.body;
+  if (!imagePath) return res.status(400).json({ error: 'path required' });
+  if (!existsSync(imagePath)) {
+    return res.status(400).json({ error: `no such file: ${imagePath}` });
+  }
+
+  const target = req.body.target || jidNormalizedUser(sock.user.id);
+  try {
+    await sock.updateProfilePicture(target, { url: imagePath });
+    res.json({ success: true, target });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      target,
+      error: err?.message || String(err),
+      code: err?.data,
+    });
+  }
+});
+
+// Current profile picture URL, for confirming a /profile-picture write landed.
+app.get('/profile-picture', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected' });
+  }
+  const jid = req.query.jid || jidNormalizedUser(sock.user.id);
+  try {
+    res.json({ jid, url: (await sock.profilePictureUrl(jid, 'image')) || null });
+  } catch (err) {
+    res.status(500).json({ jid, error: err?.message || String(err) });
+  }
+});
+
 // Chat info
 app.get('/chat/:id', async (req, res) => {
   const chatId = req.params.id;
