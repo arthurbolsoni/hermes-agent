@@ -212,7 +212,7 @@ function redactWhatsAppId(value) {
 function emitDebugEvent(payload) {
   if (!WHATSAPP_DEBUG) return;
   try {
-    console.log(JSON.stringify({ event: 'debug', ...payload }));
+    console.log(JSON.stringify({ event: 'debug', t: Date.now(), ...payload }));
   } catch {}
 }
 
@@ -536,6 +536,7 @@ async function startSocket() {
       const senderNumber = senderId.replace(/@.*/, '');
       emitDebugEvent({
         stage: 'upsert',
+        waTs: Number(msg.messageTimestamp) || null,
         type,
         fromMe: !!msg.key.fromMe,
         chatId: redactWhatsAppId(chatId),
@@ -804,6 +805,7 @@ app.use((req, res, next) => {
 // Poll for new messages (long-poll style)
 app.get('/messages', (req, res) => {
   const msgs = messageQueue.splice(0, messageQueue.length);
+  if (msgs.length) emitDebugEvent({ stage: 'drained', count: msgs.length });
   res.json(msgs);
 });
 
@@ -813,6 +815,7 @@ app.post('/send', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
+  const _sendT0 = Date.now();
   const { chatId, message, replyTo } = req.body;
   if (!chatId || !message) {
     return res.status(400).json({ error: 'chatId and message are required' });
@@ -836,6 +839,12 @@ app.post('/send', async (req, res) => {
       }
     }
 
+    emitDebugEvent({
+      stage: 'sent',
+      chatId: redactWhatsAppId(chatId),
+      chunks: chunks.length,
+      ms: Date.now() - _sendT0,
+    });
     res.json({
       success: true,
       messageId: messageIds[messageIds.length - 1],

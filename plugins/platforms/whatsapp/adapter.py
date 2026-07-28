@@ -1259,6 +1259,16 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 ) as resp:
                     if resp.status == 200:
                         messages = await resp.json()
+                        if messages:
+                            import hermes_turn_trace as _tt
+                            for _traced in messages:
+                                if not isinstance(_traced, dict):
+                                    continue
+                                _tt.mark(
+                                    "bridge_recv",
+                                    chat=_traced.get("chatId"),
+                                    wa_ts=_traced.get("timestamp"),
+                                )
                         for msg_data in messages:
                             event = await self._build_message_event(msg_data)
                             if event:
@@ -1300,6 +1310,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         period before dispatching the combined message.
         """
         key = self._text_batch_key(event)
+        import hermes_turn_trace as _tt
+        _tt.mark("debounce_start", chat=getattr(event.source, "chat_id", None))
         existing = self._pending_text_batches.get(key)
         chunk_len = len(event.text or "")
         if existing is None:
@@ -1334,6 +1346,12 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             event = self._pending_text_batches.pop(key, None)
             if not event:
                 return
+            import hermes_turn_trace as _tt
+            _tt.mark(
+                "debounce_flush",
+                chat=getattr(event.source, "chat_id", None),
+                waited=delay,
+            )
             await self.handle_message(event)
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:

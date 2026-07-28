@@ -590,11 +590,14 @@ def build_turn_context(
             f"{'...' if len(_print_preview) > 60 else ''}'"
         )
 
+    import hermes_turn_trace as _tt
+    _tt.mark("tc_prologue")
     # ── System prompt (cached per session for prefix caching) ──
     if agent._cached_system_prompt is None:
         restore_or_build_system_prompt(agent, system_message, conversation_history)
 
     active_system_prompt = agent._cached_system_prompt
+    _tt.mark("sysprompt_ready", chars=len(active_system_prompt or ""))
 
     # Create the DB session row now that _cached_system_prompt is populated, so
     # the persisted snapshot is written non-NULL on the first turn (Issue
@@ -1027,6 +1030,7 @@ def build_turn_context(
         )
         agent._persist_user_message_idx = current_turn_user_idx
 
+    _tt.mark("preflight_done")
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
     try:
@@ -1122,6 +1126,7 @@ def build_turn_context(
         agent._interrupt_message = None
         agent._interrupt_thread_signal_pending = False
 
+    _tt.mark("plugins_done")
     # Notify memory providers of the new turn (BEFORE prefetch_all).
     if agent._memory_manager:
         try:
@@ -1139,6 +1144,7 @@ def build_turn_context(
         except Exception:
             pass
 
+    _tt.mark("memory_prefetch_done", chars=len(ext_prefetch_cache or ""))
     # ── api_content sidecar: persist what you send ──
     # The prefetch/plugin context above is injected into the API copy of this
     # turn's user message, never into the stored content — so on the next
