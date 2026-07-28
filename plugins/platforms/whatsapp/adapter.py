@@ -445,6 +445,15 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._text_batch_split_delay_seconds = self._coerce_float_extra(
             "text_batch_split_delay_seconds", 10.0
         )
+        # Cadence of GET /messages against the bridge. Every inbound
+        # message waits here for half of this on average — 0.60s of a
+        # measured 2.95s warm round-trip, the cheapest latency left on
+        # the warm path. Tunable via config.yaml under
+        # ``platforms.whatsapp.extra.poll_interval_seconds``; floored so a
+        # stray 0 cannot turn the poll loop into a spin against the bridge.
+        self._poll_interval_seconds = max(
+            0.05, self._coerce_float_extra("poll_interval_seconds", 1.0)
+        )
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
 
@@ -1268,6 +1277,16 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 ) as resp:
                     if resp.status == 200:
                         messages = await resp.json()
+                        if messages:
+                            import hermes_turn_trace as _tt
+                            for _traced in messages:
+                                if not isinstance(_traced, dict):
+                                    continue
+                                _tt.mark(
+                                    "bridge_recv",
+                                    chat=_traced.get("chatId"),
+                                    wa_ts=_traced.get("timestamp"),
+                                )
                         for msg_data in messages:
                             event = await self._build_message_event(msg_data)
                             if event:
@@ -1289,7 +1308,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 print(f"[{self.name}] Poll error: {e}")
                 await asyncio.sleep(5)
             
-            await asyncio.sleep(1)  # Poll interval
+            await asyncio.sleep(self._poll_interval_seconds)
 
     async def _send_read_receipt(self, data: Dict[str, Any]) -> None:
         """Mark a policy-accepted inbound message as read via the bridge."""
@@ -1337,6 +1356,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         period before dispatching the combined message.
         """
         key = self._text_batch_key(event)
+        import hermes_turn_trace as _tt
+        _tt.mark("debounce_start", chat=getattr(event.source, "chat_id", None))
         existing = self._pending_text_batches.get(key)
         chunk_len = len(event.text or "")
         if existing is None:
@@ -1371,6 +1392,12 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             event = self._pending_text_batches.pop(key, None)
             if not event:
                 return
+            import hermes_turn_trace as _tt
+            _tt.mark(
+                "debounce_flush",
+                chat=getattr(event.source, "chat_id", None),
+                waited=delay,
+            )
             await self.handle_message(event)
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:

@@ -1125,6 +1125,8 @@ def run_conversation(
     Returns:
         Dict: Complete conversation result with final response and message history
     """
+    import hermes_turn_trace as _tt
+    _tt.mark("cl_enter")
     if moa_config is None:
         try:
             from hermes_cli.moa_config import decode_moa_turn
@@ -1175,6 +1177,7 @@ def run_conversation(
         # user message, so no byte-stable api_content sidecar can be stamped.
         moa_active=bool(moa_config),
     )
+    _tt.mark("turn_ctx_built")
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message
     messages = _ctx.messages

@@ -5614,12 +5614,19 @@ class BasePlatformAdapter(ABC):
                         except Exception:
                             logger.debug("delivery ledger record failed", exc_info=True)
                             _obligation_id = None
+                    import hermes_turn_trace as _tt
+                    _tt.mark(
+                        "send_start",
+                        chat=event.source.chat_id,
+                        chars=len(text_content),
+                    )
                     result = await delivery_adapter._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,
                         reply_to=_reply_anchor,
                         metadata=_final_thread_metadata,
                     )
+                    _tt.mark("send_done", chat=event.source.chat_id)
                     _record_delivery(result)
                     if _obligation_id is not None:
                         try:

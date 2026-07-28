@@ -8056,6 +8056,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
         except Exception:
             pass
+
+        # Pre-warm the agent module tree so the first user turn after a
+        # restart does not pay for it. ``_run_agent_inner`` imports
+        # ``run_agent`` lazily; measured at 1.90s on this device (eMMC),
+        # charged entirely to that first message. Done on a thread so the
+        # import overlaps the platform bridges still coming up, and
+        # best-effort: on failure the turn path just imports it as before.
+        def _prewarm_agent_module() -> None:
+            _started = time.monotonic()
+            try:
+                from run_agent import AIAgent  # noqa: F401
+            except Exception as exc:
+                logger.debug("agent module pre-warm skipped: %s", exc)
+                return
+            logger.info(
+                "Agent module pre-warmed in %.2fs", time.monotonic() - _started
+            )
+
+        threading.Thread(
+            target=_prewarm_agent_module, name="agent-prewarm", daemon=True
+        ).start()
         try:
             from hermes_cli.profiles import get_active_profile_name
             _profile = get_active_profile_name()
@@ -13075,6 +13096,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
+        import hermes_turn_trace as _tt
+        _tt.mark("handler_enter", chat=getattr(source, "chat_id", None))
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
         _reply_id = getattr(event, "reply_to_message_id", None)
@@ -13393,6 +13416,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Load conversation history from transcript
         history = await self.async_session_store.load_transcript(session_entry.session_id)
+        _tt.mark(
+            "history_loaded",
+            chat=getattr(source, "chat_id", None),
+            msgs=len(history) if isinstance(history, list) else None,
+        )
         
         # -----------------------------------------------------------------
         # Session hygiene: auto-compress pathologically large transcripts
@@ -14152,6 +14180,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # attachments (documents, audio, etc.) are not sent to the vision
         # tool even when they appear in the same message.
         # -----------------------------------------------------------------
+        _tt.mark("hygiene_done", chat=getattr(source, "chat_id", None))
         message_text = await self._prepare_profile_scoped_inbound_message_text(
             event=event,
             source=source,
@@ -14230,6 +14259,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # against so post-run compression publication can be identity-guarded
             # below; a /new or another lifecycle transition may move
             # session_entry.session_id while the old run is still unwinding.
+            _tt.mark("agent_start", chat=getattr(source, "chat_id", None))
             _run_start_session_id = session_entry.session_id
             agent_result = await self._run_agent(
                 message=message_text,
@@ -14312,6 +14342,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "rephrase your question."
                 )
             agent_messages = agent_result.get("messages", [])
+            _tt.mark("agent_done", chat=getattr(source, "chat_id", None))
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
             _resp_len = len(response)
@@ -20491,7 +20522,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return True
             return self._is_session_run_current(session_key, run_generation)
         
+        import hermes_turn_trace as _tt
+        _tt.mark("inner_enter")
         user_config = _load_gateway_config()
+        _tt.mark("cfg_loaded")
         platform_key = _platform_config_key(source.platform)
 
         from hermes_cli.tools_config import _get_platform_tools
@@ -21532,6 +21566,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # triggering an UnboundLocalError on the earlier read at
             # `_resolve_turn_agent_config(message, …)`.
             nonlocal message
+            import hermes_turn_trace as _tt
+            _tt.mark("run_sync_enter")
 
             # session_key is propagated via contextvars in _set_session_env()
             # (_SESSION_KEY) and via set_current_session_key() (_approval_session_key)
@@ -21598,6 +21634,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._service_tier = self._resolve_session_service_tier(
                 source=source, session_key=session_key
             )
+            _tt.mark("cfg_resolved")
             # Set up stream consumer for token streaming or interim commentary.
             _stream_consumer = None
             _stream_delta_cb = None
@@ -21712,7 +21749,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     log_message="interim_assistant_callback scheduling error",
                 )
 
+            _tt.mark("stream_setup_done")
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            _tt.mark("turn_route_done")
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -21726,6 +21765,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 user_id=getattr(source, "user_id", None),
                 user_id_alt=getattr(source, "user_id_alt", None),
             )
+            _tt.mark("agent_lookup_start")
             agent = None
             reused_cached_agent = False
             _cache_lock = getattr(self, "_agent_cache_lock", None)
@@ -21892,6 +21932,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             agent.max_iterations = max_iterations
                             logger.debug("Reusing cached agent for session %s", session_key)
                             reused_cached_agent = True
+                            _tt.mark("agent_cache_hit")
 
             # Lock released — refresh the fallback chain from disk for the
             # reused agent OUTSIDE the cache lock (config.yaml read is disk
@@ -21926,6 +21967,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         pass
 
             if agent is None:
+                _tt.mark("agent_construct_start")
                 # Config changed or first message — create fresh agent
                 agent = AIAgent(
                     model=turn_route["model"],
@@ -21972,6 +22014,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             agent, _sig, _current_msg_count, session_id,
                         )
                         self._enforce_agent_cache_cap()
+                _tt.mark("agent_constructed")
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
 
             # Per-message state — callbacks and reasoning config change every
@@ -22559,6 +22602,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _conversation_kwargs["moa_config"] = moa_config
                 if _persist_user_timestamp_override is not None:
                     _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
+                _tt.mark("pre_run_conversation")
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
@@ -23121,6 +23165,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _agent_warning_raw = _float_env("HERMES_AGENT_TIMEOUT_WARNING", 900)
             _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
             _warning_fired = False
+            _tt.mark("executor_submit")
             _executor_task = asyncio.ensure_future(
                 self._run_in_executor_with_context(run_sync)
             )
