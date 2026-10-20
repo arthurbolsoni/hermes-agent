@@ -569,7 +569,7 @@ def hermes_managed_node_tree_present(home: Path | None = None) -> bool:
 def find_node_executable(command: str) -> str | None:
     """Read PM's selected Node/npm/npx; ``None`` when PM has not installed it.
 
-    Never falls back to the user's PATH copy (callers ``pm.ensure`` on ``None``):
+    Never falls back to the user's PATH copy except on Termux (callers ``pm.ensure`` on ``None``):
     mixing toolchains breaks native-addon ABIs and npm caches. Explicit
     executable paths remain caller-owned. Discovery never installs, probes,
     repairs, or activates the retired ``HERMES_HOME/node`` layout.
@@ -588,6 +588,10 @@ def find_node_executable(command: str) -> str | None:
 
         installed = installed_package(package_name)
         if installed is None or installed.binary is None:
+            # A source checkout on Termux gets no PM Node (no bionic build is staged for it); the
+            # nodejs package owns Node/npm there, and the bridge's node_modules are built with it.
+            if sys.platform == "android" or is_termux():
+                return shutil.which(command)
             return None
         if base != "npx":
             return str(installed.binary)
